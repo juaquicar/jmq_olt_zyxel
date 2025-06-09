@@ -2,10 +2,10 @@ from jmq_olt_zyxel.OLT1408A import APIOLT1408A
 
 if __name__ == "__main__":
     # Parámetros de conexión
-    HOST = "152.170.97.181"
+    HOST = "152.170.74.208"
     PORT = 2300
     USER = "admin"
-    PASS = "tu_password"
+    PASS = "1234"
     PROMPT = "OLT1408A#"
 
     # 1) Instanciamos el cliente
