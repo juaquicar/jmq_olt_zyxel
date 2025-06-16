@@ -64,28 +64,19 @@ class APIOLT1408A:
         raw = self._send_command(f"show remote ont {aid} status-history")
         lines = raw.splitlines()
         history: List[Dict[str, str]] = []
-        # localizar separadores de tabla
-        seps = [i for i, l in enumerate(lines) if re.match(r'^\s*-+\+-+', l)]
+        seps = [i for i,l in enumerate(lines) if re.match(r'^\s*-+\+-+', l)]
         if len(seps) < 2:
             return history
-        # datos entre segundo separador y siguiente
         start = seps[1] + 1
         for line in lines[start:]:
-            # paro en próximo separador
             if re.match(r'^\s*-+\+-+', line):
                 break
-            if not line.strip():
-                continue
-            # limpio espacios y barras iniciales
             cleaned = line.lstrip(' |').strip()
             if not cleaned:
                 continue
-            # si contiene '|' después de limpiar, separar
-            if '|' in cleaned:
-                _, right = cleaned.split('|', 1)
-                tokens = right.strip().split()
-            else:
-                tokens = cleaned.split()
+            parts = cleaned.split('|')
+            # la parte de la derecha tiene índice, status y tiempo
+            tokens = parts[-1].strip().split()
             if len(tokens) < 3:
                 continue
             status = tokens[1]
@@ -93,29 +84,69 @@ class APIOLT1408A:
             history.append({"status": status, "tt": time_str})
         return history
 
-    def get_ont_config(self, aid: str) -> Dict[str, List[str]]:
+    def get_ont_config(self, aid: str) -> Dict[str, Any]:
         raw = self._send_command(f"show remote ont {aid} config")
         lines = raw.splitlines()
-        config: Dict[str, List[str]] = {}
-        current_section: str = None
+        result: Dict[str, Any] = {"ont": {}, "uni": {}}
+        block = None
         for line in lines:
             if re.match(r'^\s*-+\+-+', line):
                 continue
-            if '|' in line:
-                parts = line.split('|', 1)
-                section = parts[0].strip()
-                value = parts[1].strip()
-                current_section = section
-                config[current_section] = [value] if value else []
+            stripped = line.strip()
+            if stripped.startswith(aid):
+                block = 'ont'
+                continue
+            if stripped.startswith('uniport-'):
+                block = 'uni'
+                continue
+            if not block:
+                continue
+            content = line.lstrip(' |').strip()
+            if not content:
+                continue
+            tokens = content.split()
+            if block == 'ont':
+                key = tokens[0].lower()
+                if key in ['sn','password','full-bridge','template-description','alarm-profile','anti-mac-spoofing']:
+                    result['ont'][key.replace('-', '_')] = tokens[1]
+                elif key == 'bwgroup':
+                    result['ont']['bwgroup'] = tokens[1]
+                    # perfiles y allocid
+                    for i,t in enumerate(tokens):
+                        if t == 'usbwprofname':
+                            result['ont']['usbwprofname'] = tokens[i+1]
+                        if t == 'dsbwprofname':
+                            result['ont']['dsbwprofname'] = tokens[i+1]
+                        if t == 'allocid':
+                            result['ont']['allocid'] = tokens[i+1]
             else:
-                cleaned = line.lstrip(' |').strip()
-                if current_section and cleaned:
-                    config[current_section].append(cleaned)
-        return config
+                if tokens[0] == 'no' and tokens[1] == 'inactive':
+                    result['uni']['active'] = True
+                elif tokens[0] == 'no' and tokens[1] == 'pmenable':
+                    result['uni']['pmenable'] = False
+                elif tokens[0] == 'queue' and tokens[1] == 'tc':
+                    entry = {'tc': int(tokens[2])}
+                    for i,t in enumerate(tokens):
+                        if t == 'priority': entry['priority'] = int(tokens[i+1])
+                        if t == 'weight': entry['weight'] = int(tokens[i+1])
+                        if t == 'usbwprofname': entry['usbwprofname'] = tokens[i+1]
+                        if t == 'dsbwprofname': entry['dsbwprofname'] = tokens[i+1]
+                        if t == 'dsoption': entry['dsoption'] = tokens[i+1]
+                        if t == 'bwsharegroupid': entry['bwsharegroupid'] = tokens[i+1]
+                    result['uni'].setdefault('queues', []).append(entry)
+                elif tokens[0] == 'vlan':
+                    result['uni']['vlan'] = tokens[1]
+                elif tokens[0] == 'gemport':
+                    result['uni']['gemport'] = tokens[1]
+                elif tokens[0] == 'ingprof':
+                    result['uni']['ingprof'] = tokens[1]
+                elif tokens[0] == 'aesencrypt':
+                    result['uni']['aesencrypt'] = tokens[1]
+        return result
 
     def _parse_table(self, raw: str, key_prefix: str = "ont-") -> List[Dict[str, Any]]:
         lines = raw.splitlines()
-        seps = [i for i, l in enumerate(lines) if re.match(r'^\s*-+\+-+', l)]
+        seps = [i for i,l in enumerate(lines) if re.match(r'^\s*-+\+-+', l)]
         if len(seps) < 2:
             return []
         header_idx = seps[0] + 1
