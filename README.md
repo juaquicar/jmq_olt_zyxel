@@ -2,40 +2,6 @@
 
 **`jmq_olt_zyxel`** es un paquete en Python que proporciona una interfaz basada en clases para conectar vía Telnet a un OLT Zyxel (modelo `OLT1408A`) y extraer información de las ONT (Optical Network Terminations) en estructuras de datos listas para serializar a JSON. Todo se realiza sin SNMP, únicamente mediante comandos Telnet y parseo de las salidas ASCII.
 
-La clase principal:
-
-```bash
-jmq_olt_zyxel/OLT1408A.py
-```
-
-```python
-class APIOLT1408A:
-    ...
-```
-
----
-
-## Tabla de contenidos
-
-1. [Características principales](#características-principales)
-2. [Requisitos](#requisitos)
-3. [Instalación](#instalación)
-4. [Estructura del proyecto](#estructura-del-proyecto)
-5. [Uso básico](#uso-básico)
-
-   * [Inicialización y login](#inicialización-y-login)
-   * [Obtener todas las ONT](#obtener-todas-las-ont)
-   * [Obtener ONT no registradas](#obtener-ont-no-registradas)
-   * [Obtener detalles de una ONT específica](#obtener-detalles-de-una-ont-específica)
-   * [Obtener historial de estado](#obtener-historial-de-estado)
-   * [Obtener configuración avanzada](#obtener-configuración-avanzada)
-   * [Cerrar sesión Telnet](#cerrar-sesión-telnet)
-6. [Referencia de la API](#referencia-de-la-api)
-7. [Ejemplos de salida JSON](#ejemplos-de-salida-json)
-8. [Licencia](#licencia)
-
----
-
 ## Características principales
 
 * Conexión y autenticación vía Telnet.
