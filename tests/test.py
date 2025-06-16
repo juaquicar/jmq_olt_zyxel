@@ -1,29 +1,43 @@
+import json
 from jmq_olt_zyxel.OLT1408A import APIOLT1408A
 
+HOST = "152.170.74.208"
+PORT = 2300
+USER = "admin"
+PASS = "1234"
+PROMPT = "OLT1408A#"
+
 if __name__ == "__main__":
-    # Parámetros de conexión
-    HOST = "152.170.74.208"
-    PORT = 2300
-    USER = "admin"
-    PASS = "1234"
-    PROMPT = "OLT1408A#"
-
-    # 1) Instanciamos el cliente
     client = APIOLT1408A(host=HOST, port=PORT, username=USER, password=PASS, prompt=PROMPT)
-
     try:
-        # 2) Obtenemos todas las ONTs
+        # 1) Todas las ONTs registradas
         all_onts = client.get_all_onts()
-        print("Resumen de ONTs (en JSON):")
+        print("--- Todas las ONTs registradas ---")
         print(client.to_json(all_onts))
 
-        # 3) Para cada ONT, podemos ver más detalles. Por ejemplo, la primera:
+        # 2) ONTs no registradas
+        unreg = client.get_unregistered_onts()
+        print("--- ONTs no registradas ---")
+        print(client.to_json(unreg))
+
         if all_onts:
-            first_aid = all_onts[0]["AID"]
-            details = client.get_ont_details(first_aid)
-            print(f"\nDetalles completos de la ONT {first_aid}:")
+            aid = all_onts[0]["AID"]
+            # 3) Detalles de la primera ONT
+            details = client.get_ont_details(aid)
+            print(f"--- Detalles de la ONT {aid} ---")
             print(client.to_json(details))
 
+            # 4) Historial de estado de la ONT
+            history = client.get_ont_status_history(aid)
+            print(f"--- Historial de estado de la ONT {aid} ---")
+            print(client.to_json(history))
+
+            # 5) Configuración de la ONT
+            config = client.get_ont_config(aid)
+            print(f"--- Configuración de la ONT {aid} ---")
+            print(client.to_json(config))
+        else:
+            print("No hay ONTs registradas para probar detalles, historial ni configuración.")
+
     finally:
-        # 4) Cerramos la conexión
         client.close()
