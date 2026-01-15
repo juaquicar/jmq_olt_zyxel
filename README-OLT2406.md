@@ -66,7 +66,7 @@ client = APIOLT2406(
     port=18103,
     username="admin",
     password="***",
-    prompt_base="OLT2406#",
+    prompt="OLT2406#",
     timeout=30,
     debug=False,
     debug_telnet_dump=False,
@@ -77,7 +77,7 @@ client = APIOLT2406(
 
 Parámetros relevantes:
 
-* `prompt_base`: normalmente `"OLT2406#"` (puede llegar con o sin espacio).
+* `prompt`: normalmente `"OLT2406#"` (puede llegar con o sin espacio).
 * `timeout`: timeout global de lectura/ejecución de comando.
 * `debug`: habilita logs `[DEBUG]`.
 * `debug_telnet_dump`: si `True`, imprime dumps de salida Telnet en consola (filtrando ANSI).
@@ -122,7 +122,7 @@ if __name__ == "__main__":
         port=PORT,
         username=USER,
         password=PASS,
-        prompt_base=PROMPT_BASE,
+        prompt=PROMPT_BASE,
         timeout=30,
         debug=False,
     )
@@ -496,7 +496,7 @@ client = APIOLT2406(
     port=18103,
     username="admin",
     password="***",
-    prompt_base="OLT2406#",
+    prompt="OLT2406#",
     timeout=30,
     debug=False,
 )

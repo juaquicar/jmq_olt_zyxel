@@ -61,7 +61,7 @@ class APIOLT2406:
         port: int,
         username: str,
         password: str,
-        prompt_base: str = "OLT2406#",
+        prompt: str = "OLT2406#",
         timeout: int = 30,
         login_user_prompt: bytes = b"User name:",
         login_pass_prompt: bytes = b"Password:",
@@ -75,7 +75,7 @@ class APIOLT2406:
         self.username = username
         self.password = password
 
-        self.prompt_base = prompt_base
+        self.prompt = prompt
         self.timeout = timeout
         self.login_user_prompt = login_user_prompt
         self.login_pass_prompt = login_pass_prompt
@@ -85,15 +85,15 @@ class APIOLT2406:
         self.eol = eol
 
         # Prompt detection robusto:
-        self._prompt_end_re = re.compile(re.escape(self.prompt_base).encode("ascii") + rb"\s*$")
-        self._prompt_only_re = re.compile(rb"^\s*" + re.escape(self.prompt_base).encode("ascii") + rb"\s*$")
+        self._prompt_end_re = re.compile(re.escape(self.prompt).encode("ascii") + rb"\s*$")
+        self._prompt_only_re = re.compile(rb"^\s*" + re.escape(self.prompt).encode("ascii") + rb"\s*$")
 
         self.tn = telnetlib.Telnet()
 
         self._d(
             "Init APIOLT2406 "
             f"(host={self.host}, port={self.port}, timeout={self.timeout}, "
-            f"prompt_base={self.prompt_base!r}, debug={self.debug}, "
+            f"prompt={self.prompt!r}, debug={self.debug}, "
             f"debug_telnet_dump={self.debug_telnet_dump}, "
             f"debug_telnet_raw_file={self.debug_telnet_raw_file!r}, "
             f"eol={self.eol!r})"

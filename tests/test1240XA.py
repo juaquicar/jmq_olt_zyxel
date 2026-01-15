@@ -26,7 +26,7 @@ if __name__ == "__main__":
         port=PORT,
         username=USER,
         password=PASS,
-        prompt_base=PROMPT,
+        prompt=PROMPT,
         debug=True,  # pon False si no quieres logs
     )
     try:

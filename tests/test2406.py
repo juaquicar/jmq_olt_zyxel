@@ -27,7 +27,7 @@ if __name__ == "__main__":
         port=PORT,
         username=USER,
         password=PASS,
-        prompt_base=PROMPT_BASE,
+        prompt=PROMPT_BASE,
         timeout=30,
         debug=False,
     )
