@@ -18,6 +18,11 @@
 
 ---
 
+### OLTs Integradas
+
+ - 1408A
+ - 2406
+ - 1240XA (Pendiente)
 
 ## Licencia
 
