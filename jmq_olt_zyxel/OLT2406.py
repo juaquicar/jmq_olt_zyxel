@@ -18,6 +18,10 @@ Reparaciones incluidas (basadas en tus logs reales):
 
 Mantiene la misma API pública:
 - get_all_onts, get_unregistered_onts, get_ont_details, get_ont_status_history, get_ont_config, to_json, close
+
+Ajuste solicitado:
+- get_ont_details(aid) devuelve salida PLANA (Dict[str, Any]) tipo OLT1408A:
+  {"Status": "...", "Estimated distance": "...", ...}
 """
 
 import telnetlib
@@ -73,10 +77,7 @@ class APIOLT2406:
         self.eol = eol
 
         # Prompt detection robusto:
-        # - prompt al final del buffer (sin necesidad de newline)
         self._prompt_end_re = re.compile(re.escape(self.prompt_base).encode("ascii") + rb"\s*$")
-
-        # Prompt “solo” (para ignore_progress)
         self._prompt_only_re = re.compile(rb"^\s*" + re.escape(self.prompt_base).encode("ascii") + rb"\s*$")
 
         self.tn = telnetlib.Telnet()
@@ -103,22 +104,12 @@ class APIOLT2406:
             print(f"[{self._ts()}] [DEBUG] {msg}")
 
     def _strip_ansi(self, raw: bytes) -> bytes:
-        """
-        Elimina secuencias ANSI para imprimir en consola sin que el terminal reaccione.
-        """
         return self.ANSI_RE.sub(b"", raw)
 
     def _dump_telnet(self, context: str, raw: bytes) -> None:
-        """
-        Dump de TELNET para depuración:
-        - Guarda RAW exacto a fichero (si configurado).
-        - Imprime en consola un bloque START/END con timestamps.
-          Para evitar que tu terminal responda a ANSI (p.ej. ESC[6n), filtramos ANSI.
-        """
         if not self.debug:
             return
 
-        # 1) Guardado raw exacto (opcional)
         if self.debug_telnet_raw_file:
             try:
                 with open(self.debug_telnet_raw_file, "ab") as f:
@@ -128,7 +119,6 @@ class APIOLT2406:
             except Exception as e:
                 self._d(f"_dump_telnet: error escribiendo RAW a fichero => {e!r}")
 
-        # 2) Impresión a consola (opcional)
         if not self.debug_telnet_dump:
             return
 
@@ -139,25 +129,17 @@ class APIOLT2406:
         except Exception:
             txt = raw.decode("utf-8", errors="replace")
 
-        # imprimir tal cual (sin añadir prefijos dentro del bloque)
         sys.stdout.write(txt)
         sys.stdout.flush()
         if not txt.endswith("\n"):
             sys.stdout.write("\n")
             sys.stdout.flush()
-
         print(f"[{self._ts()}] [TELNET] --- {context} END ---")
 
     # -----------------------------
-    # ANSI/VT100 autoresponse (CRÍTICO en tu OLT)
+    # ANSI/VT100 autoresponse
     # -----------------------------
     def _ansi_autoreply(self, data: bytes) -> None:
-        """
-        La OLT envía ESC[6n (Device Status Report). Si no respondemos, la CLI se queda
-        en estado incompleto y no ejecuta/retorna comandos.
-
-        Respondemos con ESC[1;1R (cursor 1,1).
-        """
         if b"\x1b[6n" in data:
             self._d("ANSI query detectada: ESC[6n. Respondiendo ESC[1;1R por telnet.")
             try:
@@ -184,10 +166,8 @@ class APIOLT2406:
 
         self._d("Esperando prompt de CLI (post-login)...")
         buf = self._read_until_prompt(timeout=self.timeout, require_progress=False, context="POST-LOGIN")
-        self._d(f"Post-login read bytes={len(buf)} (prompt detectado o timeout).")
         self._dump_telnet("POST-LOGIN", buf)
 
-        # Asegurar prompt “vivo” tras login (muchas CLIs solo lo muestran tras Enter)
         self._d("Post-login: forcing resync newline para obtener prompt...")
         self.tn.write(self.eol)
         buf2 = self._read_until_prompt(timeout=min(5, self.timeout), require_progress=False, context="POST-LOGIN-RESYNC")
@@ -196,9 +176,6 @@ class APIOLT2406:
         self._d("Sesión iniciada (si hay prompt visible en dumps).")
 
     def _drain_input(self, drain_for: float = 0.25) -> bytes:
-        """
-        Vacia el buffer de entrada durante un pequeño intervalo.
-        """
         self._d(f"_drain_input(drain_for={drain_for}) => start")
         end = time.time() + drain_for
         buf = b""
@@ -216,13 +193,9 @@ class APIOLT2406:
         return buf
 
     def _has_real_progress(self, buf: bytes) -> bool:
-        """
-        Progreso real: algo que no sea whitespace y que no sea SOLO el prompt.
-        """
         tmp = buf.strip(b"\r\n\t ")
         if not tmp:
             return False
-        # si el buffer reducido es solo prompt -> no es progreso real
         if self._prompt_only_re.match(tmp):
             return False
         return True
@@ -234,12 +207,6 @@ class APIOLT2406:
         require_progress: bool = False,
         context: str = "READ",
     ) -> bytes:
-        """
-        Lee del socket hasta detectar prompt al final del buffer.
-        - Detecta prompt aunque no venga como línea completa (sin newline).
-        - Maneja ANSI queries (ESC[6n) respondiendo por telnet.
-        - Si require_progress=True, no devuelve si solo hemos visto prompt “vacío”.
-        """
         if timeout is None:
             timeout = self.timeout
 
@@ -253,24 +220,19 @@ class APIOLT2406:
         while time.time() < end_time:
             chunk = self.tn.read_very_eager()
             if chunk:
-                # autoresponder ANSI si aplica
                 self._ansi_autoreply(chunk)
-
                 buf += chunk
 
                 if not saw_progress and self._has_real_progress(buf):
                     saw_progress = True
 
-                # debug ligero
                 now = time.time()
                 if self.debug and (now - last_stat) >= 0.8:
                     last_stat = now
                     self._d(f"_read_until_prompt: bytes={len(buf)} saw_progress={saw_progress}")
 
-                # prompt al final del buffer (robusto)
                 if self._prompt_end_re.search(buf.rstrip(b"\r\n")):
                     if require_progress and not saw_progress:
-                        # es solo prompt viejo (o nada real), seguimos leyendo
                         continue
                     self._d("_read_until_prompt: prompt detectado al final del buffer.")
                     return buf
@@ -283,9 +245,6 @@ class APIOLT2406:
         return buf
 
     def _resync_cli(self) -> None:
-        """
-        Fuerza que la CLI esté en estado "prompt listo".
-        """
         self._d("_resync_cli: enviando EOL para resincronizar...")
         self.tn.write(self.eol)
         buf = self._read_until_prompt(timeout=min(5, self.timeout), require_progress=False, context="RESYNC")
@@ -293,107 +252,85 @@ class APIOLT2406:
         _ = self._drain_input(drain_for=0.15)
 
     def _send_command(self, command: str) -> str:
-        """
-        Envía comando y devuelve output (sin el prompt final).
-        """
         self._d(f"_send_command: preparando comando={command!r}")
 
-        # asegurar prompt
         self._resync_cli()
-
-        # limpiar residuos
         _ = self._drain_input(drain_for=0.2)
 
-        # enviar comando
         self._d(f"CMD => {command}")
         self.tn.write(command.encode("ascii") + self.eol)
 
-        # leer hasta prompt, exigiendo progreso real
         raw = self._read_until_prompt(timeout=self.timeout, require_progress=True, context=f"CMD:{command}")
-        self._d(f"_send_command: raw bytes={len(raw)}")
         self._dump_telnet(f"CMD OUTPUT: {command}", raw)
 
-        # limpiar prompt final del raw
-        text = raw.decode("latin-1", errors="ignore")
-        # Eliminamos el prompt final aunque no tenga newline
-        # -> cortamos desde el último match del prompt en el final
-        # Nota: si el prompt apareció también antes, esto conserva lo anterior.
         m = self._prompt_end_re.search(raw.rstrip(b"\r\n"))
-        if m:
-            # posición en bytes del match
-            cut = m.start()
-            raw_wo_prompt = raw[:cut]
-        else:
-            raw_wo_prompt = raw
+        raw_wo_prompt = raw[: m.start()] if m else raw
 
         out = raw_wo_prompt.decode("latin-1", errors="ignore")
 
-        # quitar eco del comando si aparece como primera línea visible
         lines = out.splitlines()
         while lines and not lines[0].strip():
             lines.pop(0)
         if lines and lines[0].strip() == command.strip():
             lines.pop(0)
 
-        out2 = "\n".join(lines).strip("\n")
-        self._d(f"_send_command: out chars={len(out2)} líneas={len(out2.splitlines()) if out2 else 0}")
-        return out2
+        return "\n".join(lines).strip("\n")
 
     # -----------------------------
     # API pública
     # -----------------------------
     def get_all_onts(self) -> List[Dict[str, Any]]:
-        self._d("get_all_onts: start")
         raw = self._send_command("show remote ont")
-        rows = self._parse_table_any(raw, row_prefix="ont-")
-        self._d(f"get_all_onts: rows={len(rows)}")
-        return rows
+        return self._parse_table_any(raw, row_prefix="ont-")
 
     def get_unregistered_onts(self) -> List[Dict[str, Any]]:
-        self._d("get_unregistered_onts: start")
         raw = self._send_command("show remote ont unreg")
-        rows = self._parse_table_any(raw, row_prefix="pon-")
-        self._d(f"get_unregistered_onts: rows={len(rows)}")
-        return rows
+        return self._parse_table_any(raw, row_prefix="pon-")
 
     def get_ont_details(self, aid: str) -> Dict[str, Any]:
+        """
+        SALIDA PLANA (como OLT1408A):
+        {
+          "Status": "...",
+          "Estimated distance": "...",
+          ...
+        }
+        """
         self._d(f"get_ont_details: start aid={aid!r}")
         raw = self._send_command(f"show remote ont {aid}")
         lines = raw.splitlines()
 
-        details: Dict[str, Any] = {
-            "aid": aid,
-            "kv": {},
-            "sections": {},
-        }
+        details: Dict[str, Any] = {}
 
         for line in lines:
-            stripped = line.strip()
-            cleaned = stripped.lstrip("|").strip() if stripped.startswith("|") else stripped
+            if ":" not in line:
+                continue
 
-            if ":" in cleaned:
-                key, val = cleaned.split(":", 1)
-                k = key.strip()
-                v = val.strip()
+            # tolerancia a formatos con pipes
+            cleaned = line.strip()
+            cleaned = cleaned.lstrip("|").strip()
+            cleaned = cleaned.lstrip(" |").strip()
 
-                section_key = None
-                for prefix in ("Wan ", "Ethernet ", "POTS/VoIP ", "Status", "Control Supported"):
-                    if k.startswith(prefix):
-                        section_key = prefix.strip()
-                        break
+            if ":" not in cleaned:
+                continue
 
-                details["kv"][k] = v
-                if section_key:
-                    details["sections"].setdefault(section_key, []).append({k: v})
+            key, val = cleaned.split(":", 1)
+            k = key.strip()
+            v = val.strip()
+
+            if not k:
+                continue
+
+            # si hay claves repetidas, nos quedamos con la última (lo más común en CLIs)
+            details[k] = v
 
         return details
 
     def get_ont_status_history(self, aid: str) -> List[Dict[str, Any]]:
-        self._d(f"get_ont_status_history: start aid={aid!r}")
         raw = self._send_command(f"show remote ont {aid} status-history")
         lines = raw.splitlines()
-
         history: List[Dict[str, Any]] = []
+
         for line in lines:
             if "|" not in line:
                 continue
@@ -418,17 +355,10 @@ class APIOLT2406:
         return history
 
     def get_ont_config(self, aid: str) -> Dict[str, Any]:
-        self._d(f"get_ont_config: start aid={aid!r}")
         raw = self._send_command(f"show remote ont {aid} config")
         lines = raw.splitlines()
 
-        result: Dict[str, Any] = {
-            "aid": aid,
-            "ont": {},
-            "uniports": {},
-            "raw_lines": [],
-        }
-
+        result: Dict[str, Any] = {"aid": aid, "ont": {}, "uniports": {}, "raw_lines": []}
         current_block: Optional[str] = None
         current_uniport: Optional[str] = None
 
@@ -478,70 +408,51 @@ class APIOLT2406:
     # Parsing helpers
     # -----------------------------
     def _parse_table_any(self, raw: str, row_prefix: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Parser tolerante a:
-        - separadores tipo "-----+-----" y tablas con pipes
-        - tablas con múltiples bloques (unreg)
-        """
-        self._d(f"_parse_table_any: start row_prefix={row_prefix!r} raw chars={len(raw)}")
         lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
-        self._d(f"_parse_table_any: non-empty lines={len(lines)}")
-
         headers: Optional[List[str]] = None
         rows: List[Dict[str, Any]] = []
 
-        for i, line in enumerate(lines):
+        for line in lines:
             s = line.strip()
 
-            # separadores con "+" (unreg/detalles)
             if self.SEP_RE.match(s):
                 continue
-
             if "Total:" in s:
                 break
 
-            if "|" in s:
-                cols = [c.strip() for c in s.split("|")]
+            if "|" not in s:
+                continue
 
-                if headers is None:
-                    first = cols[0] if cols else ""
-                    looks_like_aid = (
-                        first.startswith("ont-")
-                        or first.startswith("pon-")
-                        or first.startswith("Pon_AID")
-                        or first.startswith("AID")
-                    )
+            cols = [c.strip() for c in s.split("|")]
 
-                    # cabecera típica
-                    if first in ("AID", "Pon_AID") or ("Template-ID" in s) or ("Status" in s and "Time" in s):
-                        headers = cols
-                        continue
-                    if "SN" in cols and ("Status" in cols or "Password" in cols):
-                        headers = cols
-                        continue
-                    if not looks_like_aid:
-                        headers = cols
-                        continue
+            if headers is None:
+                first = cols[0] if cols else ""
+                if first in ("AID", "Pon_AID") or ("Template-ID" in s) or ("Status" in s and "Time" in s):
+                    headers = cols
+                    continue
+                if "SN" in cols and ("Status" in cols or "Password" in cols):
+                    headers = cols
+                    continue
+                if not (first.startswith("ont-") or first.startswith("pon-")):
+                    headers = cols
+                    continue
 
-                if headers is None:
-                    headers = [f"col_{k}" for k in range(len(cols))]
+            if headers is None:
+                headers = [f"col_{k}" for k in range(len(cols))]
 
-                if len(cols) != len(headers):
-                    if len(cols) < len(headers):
-                        cols = cols + [""] * (len(headers) - len(cols))
-                    else:
-                        cols = cols[: len(headers)]
+            if len(cols) != len(headers):
+                if len(cols) < len(headers):
+                    cols = cols + [""] * (len(headers) - len(cols))
+                else:
+                    cols = cols[: len(headers)]
 
-                row = dict(zip(headers, cols))
+            if row_prefix:
+                first_val = cols[0].strip() if cols else ""
+                if not first_val.startswith(row_prefix):
+                    continue
 
-                if row_prefix:
-                    first_val = cols[0].strip() if cols else ""
-                    if not first_val.startswith(row_prefix):
-                        continue
+            rows.append(dict(zip(headers, cols)))
 
-                rows.append(row)
-
-        self._d(f"_parse_table_any: rows={len(rows)} headers={'set' if headers else 'None'}")
         return rows
 
     def _parse_config_line_into(self, target: Dict[str, Any], line: str) -> None:
@@ -554,7 +465,7 @@ class APIOLT2406:
             return
 
         if len(tokens) >= 2 and tokens[0] == "no":
-            key = tokens[1].replace("-", "_")
+            key = tokens[1].replace("-", "_").lower()
             target[key] = False
             return
 
@@ -592,14 +503,11 @@ class APIOLT2406:
             target.setdefault("vlans", []).append(entry)
             return
 
-        if len(tokens) >= 2:
-            if len(tokens) == 2:
-                target[key0] = tokens[1]
-            else:
-                target.setdefault("lines", []).append(s)
+        if len(tokens) == 2:
+            target[key0] = tokens[1]
             return
 
-        target.setdefault("flags", []).append(key0)
+        target.setdefault("lines", []).append(s)
 
     # -----------------------------
     # Utilidades

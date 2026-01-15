@@ -19,6 +19,7 @@ USER = "admin"
 PASS = "f2%C4+f1$d7("
 PROMPT_BASE = "OLT2406#"
 
+AID_TEST = "ont-3-1-1"
 
 if __name__ == "__main__":
     client = APIOLT2406(
@@ -33,9 +34,9 @@ if __name__ == "__main__":
 
     try:
         # 1) Todas las ONTs registradas
-        all_onts = client.get_all_onts()
-        print("--- Todas las ONTs registradas ---")
-        print(client.to_json(all_onts))
+        # all_onts = client.get_all_onts()
+        # print("--- Todas las ONTs registradas ---")
+        # print(client.to_json(all_onts))
 
         # 2) ONTs no registradas (UnReg)
         unreg = client.get_unregistered_onts()
@@ -44,31 +45,31 @@ if __name__ == "__main__":
 
         # Intentamos elegir un AID válido para detalles/historial/config:
         # Preferimos de la lista "show remote ont" usando clave "AID" si existe.
-        aid = None
-        if all_onts:
-            if isinstance(all_onts[0], dict):
-                # Caso típico: headers incluyen "AID"
-                aid = all_onts[0].get("AID") or all_onts[0].get("Aid") or all_onts[0].get("aid")
-                # Si la tabla viene con una columna diferente, intenta primera key:
-                if not aid:
-                    first_key = next(iter(all_onts[0].keys()), None)
-                    if first_key:
-                        aid = all_onts[0].get(first_key)
-
+        # aid = None
+        # if all_onts:
+        #     if isinstance(all_onts[0], dict):
+        #         # Caso típico: headers incluyen "AID"
+        #         aid = all_onts[0].get("AID") or all_onts[0].get("Aid") or all_onts[0].get("aid")
+        #         # Si la tabla viene con una columna diferente, intenta primera key:
+        #         if not aid:
+        #            first_key = next(iter(all_onts[0].keys()), None)
+        #            if first_key:
+        #                aid = all_onts[0].get(first_key)
+        aid = AID_TEST
         if aid:
             # 3) Detalles de la ONT
             details = client.get_ont_details(aid)
-            print(f"--- Detalles de la ONT {aid} ---")
+            print(f"--- get_ont_details - Detalles de la ONT {aid} ---")
             print(client.to_json(details))
 
             # 4) Historial de estado de la ONT
             history = client.get_ont_status_history(aid)
-            print(f"--- Historial de estado de la ONT {aid} ---")
+            print(f"--- get_ont_status_history - Historial de estado de la ONT {aid} ---")
             print(client.to_json(history))
 
             # 5) Configuración de la ONT
             config = client.get_ont_config(aid)
-            print(f"--- Configuración de la ONT {aid} ---")
+            print(f"--- get_ont_config -Configuración de la ONT {aid} ---")
             print(client.to_json(config))
         else:
             print("No hay ONTs registradas (o no se pudo inferir AID) para probar detalles/historial/config.")
