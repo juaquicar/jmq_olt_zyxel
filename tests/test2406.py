@@ -34,9 +34,9 @@ if __name__ == "__main__":
 
     try:
         # 1) Todas las ONTs registradas
-        # all_onts = client.get_all_onts()
-        # print("--- Todas las ONTs registradas ---")
-        # print(client.to_json(all_onts))
+        all_onts = client.get_all_onts()
+        print("--- Todas las ONTs registradas ---")
+        print(client.to_json(all_onts))
 
         # 2) ONTs no registradas (UnReg)
         unreg = client.get_unregistered_onts()

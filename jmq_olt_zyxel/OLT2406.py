@@ -19,9 +19,11 @@ Reparaciones incluidas (basadas en tus logs reales):
 Mantiene la misma API pública:
 - get_all_onts, get_unregistered_onts, get_ont_details, get_ont_status_history, get_ont_config, to_json, close
 
-Ajuste solicitado:
-- get_ont_details(aid) devuelve salida PLANA (Dict[str, Any]) tipo OLT1408A:
-  {"Status": "...", "Estimated distance": "...", ...}
+Ajustes solicitados:
+- get_ont_details(aid) devuelve salida PLANA (Dict[str, Any]) tipo OLT1408A.
+- get_unregistered_onts() parsea correctamente el formato real:
+    Pon_AID | Type SN Password Status
+    pon-x-y | UnReg <SN> DEFAULT Active
 """
 
 import telnetlib
@@ -46,6 +48,12 @@ class APIOLT2406:
 
     # ANSI / VT100 (para filtrar en consola y evitar efectos colaterales del terminal)
     ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
+
+    # Fila UNREG real:
+    #   UnReg 5A59495397426460 DEFAULT Active
+    _UNREG_ROW_RE = re.compile(
+        r"^(?P<type>\S+)\s+(?P<sn>[0-9A-Fa-f]{8,32})\s+(?P<password>\S+)\s+(?P<status>\S+)\s*$"
+    )
 
     def __init__(
         self,
@@ -285,28 +293,21 @@ class APIOLT2406:
 
     def get_unregistered_onts(self) -> List[Dict[str, Any]]:
         raw = self._send_command("show remote ont unreg")
-        return self._parse_table_any(raw, row_prefix="pon-")
+        return self._parse_unreg_onts(raw)
 
     def get_ont_details(self, aid: str) -> Dict[str, Any]:
         """
-        SALIDA PLANA (como OLT1408A):
-        {
-          "Status": "...",
-          "Estimated distance": "...",
-          ...
-        }
+        SALIDA PLANA (como OLT1408A).
         """
         self._d(f"get_ont_details: start aid={aid!r}")
         raw = self._send_command(f"show remote ont {aid}")
         lines = raw.splitlines()
 
         details: Dict[str, Any] = {}
-
         for line in lines:
             if ":" not in line:
                 continue
 
-            # tolerancia a formatos con pipes
             cleaned = line.strip()
             cleaned = cleaned.lstrip("|").strip()
             cleaned = cleaned.lstrip(" |").strip()
@@ -317,11 +318,9 @@ class APIOLT2406:
             key, val = cleaned.split(":", 1)
             k = key.strip()
             v = val.strip()
-
             if not k:
                 continue
 
-            # si hay claves repetidas, nos quedamos con la última (lo más común en CLIs)
             details[k] = v
 
         return details
@@ -343,14 +342,9 @@ class APIOLT2406:
             if len(tokens) < 4:
                 continue
 
-            idx_token = tokens[0]
             status = tokens[1]
             time_str = " ".join(tokens[2:])
-
-            if not idx_token.isdigit():
-                continue
-
-            history.append({"idx": int(idx_token), "status": status, "tt": time_str})
+            history.append({"status": status, "tt": time_str})
 
         return history
 
@@ -358,13 +352,13 @@ class APIOLT2406:
         raw = self._send_command(f"show remote ont {aid} config")
         lines = raw.splitlines()
 
-        result: Dict[str, Any] = {"aid": aid, "ont": {}, "uniports": {}, "raw_lines": []}
+        # Mantener estructura "ont" y "uni" (plana por uniport)
+        result: Dict[str, Any] = {"aid": aid, "ont": {}, "uni": {}}
+
         current_block: Optional[str] = None
         current_uniport: Optional[str] = None
 
         for line in lines:
-            result["raw_lines"].append(line)
-
             if self.SEP_RE.match(line.strip()):
                 continue
 
@@ -382,15 +376,15 @@ class APIOLT2406:
                 if left.startswith("uniport-"):
                     current_block = "uni"
                     current_uniport = left
-                    result["uniports"].setdefault(current_uniport, {})
-                    self._parse_config_line_into(result["uniports"][current_uniport], right)
+                    result["uni"].setdefault(current_uniport, {})
+                    self._parse_config_line_into(result["uni"][current_uniport], right)
                     continue
 
                 if left == "" and current_block == "ont":
                     self._parse_config_line_into(result["ont"], right)
                     continue
                 if left == "" and current_block == "uni" and current_uniport:
-                    self._parse_config_line_into(result["uniports"][current_uniport], right)
+                    self._parse_config_line_into(result["uni"][current_uniport], right)
                     continue
 
             stripped = line.strip()
@@ -400,13 +394,71 @@ class APIOLT2406:
             if current_block == "ont":
                 self._parse_config_line_into(result["ont"], stripped)
             elif current_block == "uni" and current_uniport:
-                self._parse_config_line_into(result["uniports"][current_uniport], stripped)
+                self._parse_config_line_into(result["uni"][current_uniport], stripped)
 
         return result
 
     # -----------------------------
     # Parsing helpers
     # -----------------------------
+    def _parse_unreg_onts(self, raw: str) -> List[Dict[str, Any]]:
+        """
+        Parser determinista para el formato real:
+
+          Pon_AID | Type SN Password Status
+          pon-3-3 | UnReg 5A... DEFAULT Active
+
+        Devuelve:
+          [{"Pon_AID":"pon-3-3","Type":"UnReg","SN":"...","Password":"DEFAULT","Status":"Active"}, ...]
+        """
+        lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
+        rows: List[Dict[str, Any]] = []
+
+        for line in lines:
+            s = line.rstrip()
+
+            # cortar al total
+            if s.strip().startswith("Total:"):
+                break
+
+            # saltar separadores (incluyendo los largos de tu ejemplo)
+            if self.SEP_RE.match(s.strip()):
+                continue
+
+            # saltar cabecera
+            if s.strip().startswith("Pon_AID"):
+                continue
+
+            if "|" not in s:
+                continue
+
+            left, right = s.split("|", 1)
+            pon_aid = left.strip()
+            right = right.strip()
+
+            if not pon_aid.startswith("pon-"):
+                continue
+
+            # normalizar espacios del bloque derecho para parseo estable
+            right_norm = " ".join(right.split())
+
+            m = self._UNREG_ROW_RE.match(right_norm)
+            if not m:
+                rows.append({"Pon_AID": pon_aid, "raw": right})
+                continue
+
+            rows.append(
+                {
+                    "Pon_AID": pon_aid,
+                    "Type": m.group("type"),
+                    "SN": m.group("sn"),
+                    "Password": m.group("password"),
+                    "Status": m.group("status"),
+                }
+            )
+
+        return rows
+
     def _parse_table_any(self, raw: str, row_prefix: Optional[str] = None) -> List[Dict[str, Any]]:
         lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
         headers: Optional[List[str]] = None
