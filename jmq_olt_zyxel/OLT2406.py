@@ -130,7 +130,7 @@ class APIOLT2406:
         if not self.debug_telnet_dump:
             return
 
-        print(f"[{self._ts()}] [TELNET] --- {context} START ---")
+        # print(f"[{self._ts()}] [TELNET] --- {context} START ---")
         try:
             safe = self._strip_ansi(raw)
             txt = safe.decode("latin-1", errors="strict")
@@ -142,7 +142,7 @@ class APIOLT2406:
         if not txt.endswith("\n"):
             sys.stdout.write("\n")
             sys.stdout.flush()
-        print(f"[{self._ts()}] [TELNET] --- {context} END ---")
+        # print(f"[{self._ts()}] [TELNET] --- {context} END ---")
 
     # -----------------------------
     # ANSI/VT100 autoresponse
