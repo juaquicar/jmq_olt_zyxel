@@ -24,6 +24,14 @@ Notas importantes del 1240XA observado:
 - Parsing tolerante: las columnas pueden venir “rotas” por el ancho de la terminal;
   se intenta reconstruir por segmentos con "|" y por patrones ("Config"/"Actual").
 
+Mejora solicitada:
+- Enriquecer get_all_onts(filter=1) con el campo "ONT Rx" a partir de:
+    show interface gpon 1-* ddmi status
+  Este comando lista líneas tipo:
+    ont-1-1-1              -24.44
+    ont-1-10-28     ++       -7.06
+  Se parsea a un mapa { "ont-<aid>": "<rx>" } y se añade a cada registro por AID.
+
 Mantiene interfaz pública similar a APIOLT2406:
 - get_all_onts, get_unregistered_onts, get_ont_details, get_ont_status_history, get_ont_config, to_json, close
 
@@ -65,6 +73,14 @@ class APIOLT1240XA:
         r"^(?P<type>\S+)\s+(?P<sn>[0-9A-Fa-f]{8,32})\s+(?P<password>\S+)\s+(?P<status>\S+)\s*$"
     )
 
+    # DDMI row examples:
+    #   " ont-1-1-1              -24.44"
+    #   "ont-1-10-28     ++       -7.06"
+    #   "ont-1-12-8       -      -32.22"
+    _DDMI_ONT_RX_RE = re.compile(
+        r"^\s*(?P<ont>ont-\d+(?:-\d+){2,})\s+(?:(?:\+\+|\+|--|-)\s+)?(?P<rx>[+-]?\d+(?:\.\d+)?)\s*$"
+    )
+
     def __init__(
         self,
         host: str,
@@ -79,6 +95,7 @@ class APIOLT1240XA:
         debug_telnet_dump: bool = False,
         debug_telnet_raw_file: Optional[str] = "/tmp/olt1240xa_telnet_raw.log",
         eol: bytes = b"\r\n",
+        ddmi_timeout: int = 120,  # el ddmi status puede tardar bastante
     ):
         self.host = host
         self.port = port
@@ -87,6 +104,8 @@ class APIOLT1240XA:
 
         self.prompt = prompt
         self.timeout = timeout
+        self.ddmi_timeout = ddmi_timeout
+
         self.login_user_prompt = login_user_prompt
         self.login_pass_prompt = login_pass_prompt
         self.debug = debug
@@ -103,6 +122,7 @@ class APIOLT1240XA:
         self._d(
             "Init APIOLT1240XA "
             f"(host={self.host}, port={self.port}, timeout={self.timeout}, "
+            f"ddmi_timeout={self.ddmi_timeout}, "
             f"prompt={self.prompt!r}, debug={self.debug}, "
             f"debug_telnet_dump={self.debug_telnet_dump}, "
             f"debug_telnet_raw_file={self.debug_telnet_raw_file!r}, "
@@ -271,8 +291,15 @@ class APIOLT1240XA:
         self._dump_telnet("RESYNC", buf)
         _ = self._drain_input(drain_for=0.15)
 
-    def _send_command(self, command: str) -> str:
-        self._d(f"_send_command: preparando comando={command!r}")
+    def _send_command(self, command: str, *, timeout: Optional[int] = None) -> str:
+        """
+        Ejecuta comando y devuelve salida sin prompt final y sin eco del comando.
+        Permite timeout específico (p.e. ddmi).
+        """
+        if timeout is None:
+            timeout = self.timeout
+
+        self._d(f"_send_command: preparando comando={command!r} timeout={timeout}")
 
         self._resync_cli()
         _ = self._drain_input(drain_for=0.2)
@@ -280,7 +307,7 @@ class APIOLT1240XA:
         self._d(f"CMD => {command}")
         self.tn.write(command.encode("ascii", errors="ignore") + self.eol)
 
-        raw = self._read_until_prompt(timeout=self.timeout, require_progress=True, context=f"CMD:{command}")
+        raw = self._read_until_prompt(timeout=timeout, require_progress=True, context=f"CMD:{command}")
         self._dump_telnet(f"CMD OUTPUT: {command}", raw)
 
         m = self._prompt_end_re.search(raw.rstrip(b"\r\n"))
@@ -298,18 +325,57 @@ class APIOLT1240XA:
         return "\n".join(lines).strip("\n")
 
     # -----------------------------
+    # DDMI helpers (ONT Rx)
+    # -----------------------------
+    def _get_ddmi_rx_map(self) -> Dict[str, str]:
+        """
+        Ejecuta 'show interface gpon 1-* ddmi status' y devuelve:
+          { "ont-1-1-1": "-24.44", "ont-1-10-28": "-7.06", ... }
+        """
+        cmd = "show interface gpon 1-* ddmi status"
+        self._d(f"_get_ddmi_rx_map: ejecutando {cmd!r} (timeout={self.ddmi_timeout})")
+        raw = self._send_command(cmd, timeout=self.ddmi_timeout)
+
+        rx_map: Dict[str, str] = {}
+        for line in raw.splitlines():
+            m = self._DDMI_ONT_RX_RE.match(line.rstrip())
+            if not m:
+                continue
+            ont = m.group("ont").strip()
+            rx = m.group("rx").strip()
+            rx_map[ont] = rx
+
+        self._d(f"_get_ddmi_rx_map: {len(rx_map)} ONTs con potencia Rx parseadas.")
+        return rx_map
+
+    # -----------------------------
     # API pública (mismos nombres)
     # -----------------------------
-    def get_all_onts(self, filter: str) -> List[Dict[str, Any]]:
+    def get_all_onts(self, filter: str, *, enrich_rx: bool = True) -> List[Dict[str, Any]]:
         """
         Equivalente a OLT2406.get_all_onts(1) pero en 1240XA:
           show interface remote ont filter 1
 
         La salida real suele traer 2 filas por AID: "Config" y "Actual".
         Se consolida por AID, priorizando datos de "Actual" cuando exista.
+
+        enrich_rx=True:
+          añade "ONT Rx" mediante ddmi status (una sola consulta global).
         """
         raw = self._send_command(f"show interface remote ont filter {filter}")
-        return self._parse_all_onts_filter1(raw)
+        onts = self._parse_all_onts_filter1(raw)
+
+        if enrich_rx and onts:
+            rx_map = self._get_ddmi_rx_map()
+            for rec in onts:
+                aid = str(rec.get("AID", "")).strip()
+                if not aid:
+                    rec.setdefault("ONT Rx", "")
+                    continue
+                key = f"ont-{aid}"
+                rec["ONT Rx"] = rx_map.get(key, "")
+
+        return onts[:5]
 
     def get_unregistered_onts(self) -> List[Dict[str, Any]]:
         raw = self._send_command("show interface remote ont unreg")
@@ -503,7 +569,6 @@ class APIOLT1240XA:
                 row_type = "Actual"
 
             if row_type is None:
-                # Guardar solo interno si debug (pero no devolver nunca)
                 if self.debug:
                     rec_dbg = by_aid.setdefault(aid, {"AID": aid})
                     rec_dbg.setdefault("_raw_rows", []).append(rest)
@@ -526,13 +591,12 @@ class APIOLT1240XA:
         out: List[Dict[str, Any]] = []
         for _, rec in by_aid.items():
             rec.pop("_rows", None)
-            # _raw_rows solo si debug; si no, ni existe
             if not self.debug:
                 rec.pop("_raw_rows", None)
             out.append(rec)
 
         out.sort(key=lambda x: x.get("AID", ""))
-        return out[:5]
+        return out  # <- importante: devolver TODO (sin cortar a 5)
 
     def _parse_filter1_row_payload(self, rest_norm: str, row_type: str) -> Optional[Dict[str, Any]]:
         """
@@ -540,18 +604,13 @@ class APIOLT1240XA:
 
         Objetivo mínimo:
           Type, SN, Password, Status, Image, Active, Version, Vendor, Model
-
-        Rest normalizado típico:
-          "Config <SN> DEFAULT Active 1 V V540ABNA2E0a06 ZYXE"
-          "Actual <SN> DEFAULT IS 2 V V541ACBB1E0a06 PMG5617T20B2"
         """
         tokens = rest_norm.split()
         if len(tokens) < 5:
             return None
 
-        # tokens[0] debe ser Config/Actual
         if tokens[0] not in ("Config", "Actual"):
-            # a veces viene con ruido; permitir forzar row_type
+            # permitimos forzar
             pass
 
         t0 = tokens[0] if tokens[0] in ("Config", "Actual") else row_type
@@ -565,51 +624,37 @@ class APIOLT1240XA:
         if sn_idx is None:
             return None
 
-        # Esperamos:
-        #   <Type> <SN> <Password> <Status> ...
-        # Si no cuadra, intentamos best-effort
         typ = t0
         sn = tokens[sn_idx]
         password = tokens[sn_idx + 1] if sn_idx + 1 < len(tokens) else ""
         status = tokens[sn_idx + 2] if sn_idx + 2 < len(tokens) else ""
 
-        # Image: suele ser un número ("1" o "2")
         image = ""
         active = ""
         version = ""
         vendor_model = ""
 
-        # El resto tras status:
         tail = tokens[sn_idx + 3 :] if (sn_idx + 3) < len(tokens) else []
 
-        # Heurística: image es primer número en tail
         if tail:
             if re.fullmatch(r"\d+", tail[0]):
                 image = tail[0]
                 tail = tail[1:]
 
-        # "V" como marcador de active/version (a veces "V" aparece dos veces en tu dump por formato)
-        # Intentamos:
-        #   Active = 'V' si aparece como siguiente token "V"
-        #   Version = siguiente token tipo V540...
         if tail:
             if tail[0].upper() == "V":
                 active = "V"
                 tail = tail[1:]
-            # a veces: "V V541..." (doble V)
             if tail and tail[0].upper() == "V":
-                # asumimos que el segundo V era "active" y el primero ruido, pero lo registramos
                 if not active:
                     active = "V"
                 tail = tail[1:]
 
         if tail:
-            # versión suele empezar por "V"
             if tail[0].startswith("V"):
                 version = tail[0]
                 tail = tail[1:]
 
-        # Lo que quede puede ser Vendor o Model (en Config suele ser Vendor; en Actual suele ser Model)
         if tail:
             vendor_model = " ".join(tail)
 
@@ -626,9 +671,6 @@ class APIOLT1240XA:
         if version:
             parsed["Version"] = version
 
-        # Clasificación final:
-        # - Si parece vendor (4 letras tipo ZYXE/ZYUP/ZYIS...) => Vendor
-        # - Si parece modelo (PMG....) => Model
         if vendor_model:
             if re.fullmatch(r"[A-Za-z]{3,6}", vendor_model) or vendor_model.upper().startswith("ZY"):
                 parsed["Vendor"] = vendor_model
@@ -638,45 +680,27 @@ class APIOLT1240XA:
         return parsed
 
     def _apply_chosen_row_to_record(self, rec: Dict[str, Any], chosen: Dict[str, Any]) -> None:
-        """
-        Copia a nivel superior campos relevantes.
-        Mantiene keys en formato "bonito" similar al resto del paquete.
-        """
-        # Campos base
         for k in ("SN", "Password", "Status"):
             if k in chosen and chosen[k] != "":
                 rec[k] = chosen[k]
 
-        # Vendor / Model
         if "Model" in chosen and chosen["Model"]:
             rec["Model"] = chosen["Model"]
         if "Vendor" in chosen and chosen["Vendor"]:
             rec["Vendor"] = chosen["Vendor"]
 
-        # Version
         if "Version" in chosen and chosen["Version"]:
             rec["FW Version"] = chosen["Version"]
 
-        # Si quieres conservar el "Type" consolidado
         if "Type" in chosen and chosen["Type"]:
             rec["Type"] = chosen["Type"]
 
-        # Opcionales
         if "Image" in chosen and chosen["Image"]:
             rec["Image"] = chosen["Image"]
         if "Active" in chosen and chosen["Active"]:
             rec["Active"] = chosen["Active"]
 
     def _parse_config_1240xa(self, aid: str, raw: str) -> Dict[str, Any]:
-        """
-        Config 1240XA:
-          AID | Details
-          2-16-40 | no inactive | sn ... | ...
-          2-16-40-2-1 | no inactive | no pmenable | queue tc ... | vlan ...
-
-        Devuelve:
-          {"aid": aid, "ont": {...}, "uni": {"2-16-40-2-1": {...}}}
-        """
         lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
         result: Dict[str, Any] = {"aid": aid, "ont": {}, "uni": {}}
 
@@ -697,14 +721,12 @@ class APIOLT1240XA:
                 left = left.strip()
                 right = right.strip()
 
-                # Bloque principal ont
                 if left == aid or left == f"ont-{aid}":
                     current_block = "ont"
                     current_uni = None
                     self._parse_config_line_into(result["ont"], right)
                     continue
 
-                # Sub-bloques: empiezan por "aid-" (p.e. 2-16-40-2-1)
                 if left.startswith(aid + "-") or left.startswith(f"ont-{aid}-"):
                     current_block = "uni"
                     current_uni = left
@@ -712,7 +734,6 @@ class APIOLT1240XA:
                     self._parse_config_line_into(result["uni"][current_uni], right)
                     continue
 
-                # Continuaciones con left vacío
                 if left == "" and current_block == "ont":
                     self._parse_config_line_into(result["ont"], right)
                     continue
@@ -720,7 +741,6 @@ class APIOLT1240XA:
                     self._parse_config_line_into(result["uni"][current_uni], right)
                     continue
 
-            # Fallback: líneas sin "|" pero con contenido
             if current_block == "ont":
                 self._parse_config_line_into(result["ont"], s)
             elif current_block == "uni" and current_uni:
@@ -729,21 +749,10 @@ class APIOLT1240XA:
         return result
 
     def _parse_config_line_into(self, target: Dict[str, Any], line: str) -> None:
-        """
-        Reutiliza el enfoque de OLT2406 (best-effort):
-        - "no <flag>" => flag False
-        - "queue tc ..." => se agrega a target["queues"]
-        - "bwgroup ..." => set + key/val
-        - "vlan ..." => se agrega a target["vlans"]
-        - "key value" => target[key]=value
-        - resto => target["lines"].append(...)
-        """
         s = line.strip()
         if not s:
             return
 
-        # trocear por pipes internos, si vinieran
-        # (a veces la CLI concatena con " | " dentro de Details)
         chunks = [c.strip() for c in s.split("|") if c.strip()]
         for chunk in chunks:
             self._parse_config_chunk_into(target, chunk)
