@@ -14,7 +14,7 @@ Ejecuta:
 from jmq_olt_zyxel.OLT2406 import APIOLT2406
 
 HOST = "X.X.X.X"
-PORT = 18103
+PORT = 23
 USER = "admin"
 PASS = "***"
 PROMPT_BASE = "OLT2406#"

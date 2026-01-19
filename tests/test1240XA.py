@@ -14,7 +14,7 @@ Ejecuta (vía métodos de la API):
 from jmq_olt_zyxel.OLT1240XA import APIOLT1240XA
 
 HOST = "X.X.X.X"
-PORT = 18104
+PORT = 23
 USER = "admin"
 PASS = "****"
 PROMPT_BASE = "MSC1240XA#"

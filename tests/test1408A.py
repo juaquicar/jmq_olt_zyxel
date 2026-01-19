@@ -2,7 +2,7 @@ import json
 from jmq_olt_zyxel.OLT1408A import APIOLT1408A
 
 HOST = "X.X.X.X"
-PORT = 2300
+PORT = 23
 USER = "admin"
 PASS = "****"
 PROMPT = "OLT1408A#"
