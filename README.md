@@ -22,7 +22,12 @@
 
  - 1408A
  - 2406
- - 1240XA (Pendiente)
+ - 1240XA 
+
+### Versión
+
+#### 1.1.0
+- Integradas OLTs 1240XA y OLT2406
 
 ## Licencia
 
