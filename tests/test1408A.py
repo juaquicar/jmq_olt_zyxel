@@ -1,10 +1,10 @@
 import json
 from jmq_olt_zyxel.OLT1408A import APIOLT1408A
 
-HOST = "152.170.74.208"
-PORT = 2300
+HOST = "X.X.X.X"
+PORT = 23
 USER = "admin"
-PASS = "1234"
+PASS = "****"
 PROMPT = "OLT1408A#"
 
 if __name__ == "__main__":
