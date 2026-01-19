@@ -13,10 +13,10 @@ Ejecuta:
 
 from jmq_olt_zyxel.OLT2406 import APIOLT2406
 
-HOST = "201.251.78.101"
+HOST = "X.X.X.X"
 PORT = 18103
 USER = "admin"
-PASS = "f2%C4+f1$d7("
+PASS = "***"
 PROMPT_BASE = "OLT2406#"
 
 AID_TEST = "ont-3-1-1"

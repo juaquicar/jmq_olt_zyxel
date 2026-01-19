@@ -13,10 +13,10 @@ Ejecuta (vía métodos de la API):
 
 from jmq_olt_zyxel.OLT1240XA import APIOLT1240XA
 
-HOST = "201.251.78.101"
+HOST = "X.X.X.X"
 PORT = 18104
 USER = "admin"
-PASS = "0ltc3pr44"
+PASS = "****"
 PROMPT_BASE = "MSC1240XA#"
 
 # AID de prueba (en 1240XA NO lleva prefijo "ont-": ejemplo real "2-16-40")
