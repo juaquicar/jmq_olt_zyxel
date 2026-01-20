@@ -17,28 +17,22 @@ Mapeo de comandos (compatibilidad con la API tipo OLT2406):
 - show remote ont {aid} config            -> show interface remote ont {aid} config
 
 Notas importantes del 1240XA observado:
-- En "filter 1" la tabla suele venir con 2 filas por AID: "Config" y "Actual".
+- En "filter X" la tabla suele venir con 2 filas por AID: "Config" y "Actual".
   Esta implementación consolida por AID priorizando datos de la fila "Actual" cuando existan.
-- AID típico: "2-16-40" (sin prefijo "ont-"). En status-history aparece "ont-2-16-40"
-  en la primera columna; se soportan ambos formatos.
-- Parsing tolerante: las columnas pueden venir “rotas” por el ancho de la terminal;
-  se intenta reconstruir por segmentos con "|" y por patrones ("Config"/"Actual").
+- AID típico: "5-1-1" / "2-16-40" (sin prefijo "ont-").
 
-Mejora solicitada:
-- Enriquecer get_all_onts(filter=1) con el campo "ONT Rx" a partir de:
-    show interface gpon 1-* ddmi status
-  Este comando lista líneas tipo:
-    ont-1-1-1              -24.44
-    ont-1-10-28     ++       -7.06
-  Se parsea a un mapa { "ont-<aid>": "<rx>" } y se añade a cada registro por AID.
+Mejora:
+- Enriquecer get_all_onts(filter=X) con el campo "ONT Rx" a partir de:
+    show interface gpon <slot>-* ddmi status
 
-Mantiene interfaz pública similar a APIOLT2406:
-- get_all_onts, get_unregistered_onts, get_ont_details, get_ont_status_history, get_ont_config, to_json, close
+  Donde típicamente:
+    - filter=1 -> AIDs tipo "1-..." -> gpon 1-*
+    - filter=5 -> AIDs tipo "5-..." -> gpon 5-*
 
-Incluye debug opcional + manejo ANSI/VT100 (igual enfoque que OLT2406):
-- Auto-respuesta a ESC[6n con ESC[1;1R
-- Detección robusta de prompt al final del buffer (puede venir sin \n)
-- Dumps opcionales y volcado RAW
+  Esta implementación:
+    - Infere automáticamente los slots a consultar leyendo el primer segmento del AID (antes del primer '-').
+    - Ejecuta ddmi status por cada slot encontrado y crea un mapa {"ont-<aid>": "<rx>"}.
+    - Añade "ONT Rx" a cada registro (si hay match).
 """
 
 import telnetlib
@@ -46,7 +40,7 @@ import re
 import json
 import time
 import sys
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Set
 
 
 class APIOLT1240XA:
@@ -73,13 +67,9 @@ class APIOLT1240XA:
         r"^(?P<type>\S+)\s+(?P<sn>[0-9A-Fa-f]{8,32})\s+(?P<password>\S+)\s+(?P<status>\S+)\s*$"
     )
 
-    # DDMI row examples:
-    #   " ont-1-1-1              -24.44"
-    #   "ont-1-10-28     ++       -7.06"
-    #   "ont-1-12-8       -      -32.22"
-    _DDMI_ONT_RX_RE = re.compile(
-        r"^\s*(?P<ont>ont-\d+(?:-\d+){2,})\s+(?:(?:\+\+|\+|--|-)\s+)?(?P<rx>[+-]?\d+(?:\.\d+)?)\s*$"
-    )
+    # DDMI helpers: capturar ont-id al inicio y el último float al final (tolerante a "++", "-", etc.)
+    _DDMI_ONT_ID_RE = re.compile(r"^\s*(?P<ont>ont-\d+(?:-\d+){2,})\b", re.IGNORECASE)
+    _DDMI_LAST_FLOAT_RE = re.compile(r"(?P<rx>[+-]?\d+(?:\.\d+)?)\s*$")
 
     def __init__(
         self,
@@ -95,7 +85,7 @@ class APIOLT1240XA:
         debug_telnet_dump: bool = False,
         debug_telnet_raw_file: Optional[str] = "/tmp/olt1240xa_telnet_raw.log",
         eol: bytes = b"\r\n",
-        ddmi_timeout: int = 120,  # el ddmi status puede tardar bastante
+        ddmi_timeout: int = 120,  # ddmi status puede tardar bastante
     ):
         self.host = host
         self.port = port
@@ -160,7 +150,6 @@ class APIOLT1240XA:
         if not self.debug_telnet_dump:
             return
 
-        # print(f"[{self._ts()}] [TELNET] --- {context} START ---")
         try:
             safe = self._strip_ansi(raw)
             txt = safe.decode("latin-1", errors="strict")
@@ -172,7 +161,6 @@ class APIOLT1240XA:
         if not txt.endswith("\n"):
             sys.stdout.write("\n")
             sys.stdout.flush()
-        # print(f"[{self._ts()}] [TELNET] --- {context} END ---")
 
     # -----------------------------
     # ANSI/VT100 autoresponse
@@ -216,7 +204,6 @@ class APIOLT1240XA:
         self._d("Sesión iniciada (si hay prompt visible en dumps).")
 
     def _drain_input(self, drain_for: float = 0.25) -> bytes:
-        self._d(f"_drain_input(drain_for={drain_for}) => start")
         end = time.time() + drain_for
         buf = b""
         while time.time() < end:
@@ -227,7 +214,6 @@ class APIOLT1240XA:
                 end = max(end, time.time() + 0.05)
             else:
                 time.sleep(0.02)
-        self._d(f"_drain_input => drained bytes={len(buf)}")
         if buf:
             self._dump_telnet("DRAIN", buf)
         return buf
@@ -254,8 +240,6 @@ class APIOLT1240XA:
         buf = b""
         saw_progress = not require_progress
 
-        self._d(f"_read_until_prompt(timeout={timeout}, require_progress={require_progress}, context={context}) => start")
-
         last_stat = 0.0
         while time.time() < end_time:
             chunk = self.tn.read_very_eager()
@@ -269,23 +253,21 @@ class APIOLT1240XA:
                 now = time.time()
                 if self.debug and (now - last_stat) >= 0.8:
                     last_stat = now
-                    self._d(f"_read_until_prompt: bytes={len(buf)} saw_progress={saw_progress}")
+                    self._d(f"_read_until_prompt({context}): bytes={len(buf)} saw_progress={saw_progress}")
 
                 if self._prompt_end_re.search(buf.rstrip(b"\r\n")):
                     if require_progress and not saw_progress:
                         continue
-                    self._d("_read_until_prompt: prompt detectado al final del buffer.")
                     return buf
             else:
                 time.sleep(0.05)
 
-        self._d(f"_read_until_prompt: TIMEOUT (bytes={len(buf)})")
+        self._d(f"_read_until_prompt({context}): TIMEOUT (bytes={len(buf)})")
         if buf:
             self._dump_telnet(f"{context}-TIMEOUT-BUF", buf)
         return buf
 
     def _resync_cli(self) -> None:
-        self._d("_resync_cli: enviando EOL para resincronizar...")
         self.tn.write(self.eol)
         buf = self._read_until_prompt(timeout=min(5, self.timeout), require_progress=False, context="RESYNC")
         self._dump_telnet("RESYNC", buf)
@@ -299,12 +281,10 @@ class APIOLT1240XA:
         if timeout is None:
             timeout = self.timeout
 
-        self._d(f"_send_command: preparando comando={command!r} timeout={timeout}")
-
         self._resync_cli()
         _ = self._drain_input(drain_for=0.2)
 
-        self._d(f"CMD => {command}")
+        self._d(f"CMD => {command!r} timeout={timeout}")
         self.tn.write(command.encode("ascii", errors="ignore") + self.eol)
 
         raw = self._read_until_prompt(timeout=timeout, require_progress=True, context=f"CMD:{command}")
@@ -327,89 +307,110 @@ class APIOLT1240XA:
     # -----------------------------
     # DDMI helpers (ONT Rx)
     # -----------------------------
-    def _get_ddmi_rx_map(self) -> Dict[str, str]:
+    def _infer_slots_from_onts(self, onts: List[Dict[str, Any]], filter_value: str) -> List[int]:
         """
-        Ejecuta 'show interface gpon 1-* ddmi status' y devuelve:
-          { "ont-1-1-1": "-24.44", "ont-1-10-28": "-7.06", ... }
+        Inferir slots a partir de AIDs "S-P-O..." -> S.
+        Si no puede, fallback a filter_value si es numérico.
         """
-        cmd = "show interface gpon 1-* ddmi status"
-        self._d(f"_get_ddmi_rx_map: ejecutando {cmd!r} (timeout={self.ddmi_timeout})")
+        slots: Set[int] = set()
+        for rec in onts:
+            aid = str(rec.get("AID", "")).strip()
+            if not aid or "-" not in aid:
+                continue
+            s0 = aid.split("-", 1)[0]
+            if s0.isdigit():
+                slots.add(int(s0))
+
+        if not slots and str(filter_value).strip().isdigit():
+            slots.add(int(str(filter_value).strip()))
+
+        return sorted(slots)
+
+    def _get_ddmi_rx_map_for_slot(self, slot: int) -> Dict[str, str]:
+        """
+        Ejecuta:
+          show interface gpon <slot>-* ddmi status
+        y devuelve { "ont-<aid>": "<rx>" } para ese slot.
+        """
+        cmd = f"show interface gpon {slot}-* ddmi status"
+        self._d(f"_get_ddmi_rx_map_for_slot: {cmd!r} (timeout={self.ddmi_timeout})")
         raw = self._send_command(cmd, timeout=self.ddmi_timeout)
 
         rx_map: Dict[str, str] = {}
         for line in raw.splitlines():
-            m = self._DDMI_ONT_RX_RE.match(line.rstrip())
-            if not m:
+            s = line.rstrip("\r")
+            m_id = self._DDMI_ONT_ID_RE.match(s)
+            if not m_id:
                 continue
-            ont = m.group("ont").strip()
-            rx = m.group("rx").strip()
+            ont = m_id.group("ont").strip()
+            m_rx = self._DDMI_LAST_FLOAT_RE.search(s.strip())
+            if not m_rx:
+                continue
+            rx = m_rx.group("rx").strip()
             rx_map[ont] = rx
 
-        self._d(f"_get_ddmi_rx_map: {len(rx_map)} ONTs con potencia Rx parseadas.")
+        self._d(f"_get_ddmi_rx_map_for_slot({slot}): {len(rx_map)} ONTs parseadas.")
         return rx_map
 
+    def _get_ddmi_rx_map_for_slots(self, slots: List[int]) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
+        for slot in slots:
+            try:
+                merged.update(self._get_ddmi_rx_map_for_slot(slot))
+            except Exception as e:
+                self._d(f"DDMI slot={slot}: error => {e!r}")
+        self._d(f"_get_ddmi_rx_map_for_slots: total {len(merged)} ONTs en mapa Rx.")
+        return merged
+
     # -----------------------------
-    # API pública (mismos nombres)
+    # API pública
     # -----------------------------
     def get_all_onts(self, filter: str, *, enrich_rx: bool = True) -> List[Dict[str, Any]]:
         """
-        Equivalente a OLT2406.get_all_onts(1) pero en 1240XA:
-          show interface remote ont filter 1
+        show interface remote ont filter <filter>
 
-        La salida real suele traer 2 filas por AID: "Config" y "Actual".
-        Se consolida por AID, priorizando datos de "Actual" cuando exista.
-
-        enrich_rx=True:
-          añade "ONT Rx" mediante ddmi status (una sola consulta global).
+        Enrich Rx:
+          - infiere slot(s) desde los AIDs (p.ej. 1-..., 5-...)
+          - ejecuta ddmi status por slot: show interface gpon <slot>-* ddmi status
+          - añade "ONT Rx"
         """
         raw = self._send_command(f"show interface remote ont filter {filter}")
-        onts = self._parse_all_onts_filter1(raw)
+        onts = self._parse_all_onts_filter(raw)
 
         if enrich_rx and onts:
-            rx_map = self._get_ddmi_rx_map()
+            slots = self._infer_slots_from_onts(onts, filter_value=filter)
+            self._d(f"Enrich Rx: slots inferidos => {slots}")
+            rx_map = self._get_ddmi_rx_map_for_slots(slots)
+
+            # aplicar enrichment sin “romper” si no hay match
             for rec in onts:
                 aid = str(rec.get("AID", "")).strip()
                 if not aid:
                     rec.setdefault("ONT Rx", "")
                     continue
                 key = f"ont-{aid}"
-                rec["ONT Rx"] = rx_map.get(key, "")
+                if key in rx_map and rx_map[key] != "":
+                    rec["ONT Rx"] = rx_map[key]
+                else:
+                    rec.setdefault("ONT Rx", "")
 
-        return onts[:5]
+        return onts
 
     def get_unregistered_onts(self) -> List[Dict[str, Any]]:
         raw = self._send_command("show interface remote ont unreg")
         return self._parse_unreg_onts(raw)
 
     def get_ont_details(self, aid: str) -> Dict[str, Any]:
-        """
-        show interface remote ont {aid} status
-        Devuelve dict plano clave:valor (parseo por ":").
-        """
-        self._d(f"get_ont_details: start aid={aid!r}")
         aid_norm = self._normalize_aid(aid)
         raw = self._send_command(f"show interface remote ont {aid_norm} status")
         return self._parse_kv_colon_blocks(raw)
 
     def get_ont_status_history(self, aid: str) -> List[Dict[str, Any]]:
-        """
-        show interface remote ont {aid} status-history
-        Devuelve lista [{status, tt}, ...]
-        """
         aid_norm = self._normalize_aid(aid)
         raw = self._send_command(f"show interface remote ont {aid_norm} status-history")
         return self._parse_status_history(raw)
 
     def get_ont_config(self, aid: str) -> Dict[str, Any]:
-        """
-        show interface remote ont {aid} config
-        Devuelve estructura:
-          {"aid": "...", "ont": {...}, "uni": {...}}
-
-        En 1240XA los sub-bloques suelen venir como:
-          2-16-40        | ...
-          2-16-40-2-1    | ...
-        """
         aid_norm = self._normalize_aid(aid)
         raw = self._send_command(f"show interface remote ont {aid_norm} config")
         return self._parse_config_1240xa(aid_norm, raw)
@@ -425,7 +426,7 @@ class APIOLT1240XA:
 
     def _parse_unreg_onts(self, raw: str) -> List[Dict[str, Any]]:
         """
-        Formato real:
+        Formato:
           Pon_AID | Type SN Password Status
           pon-x-y | UnReg <SN> DEFAULT Active
         """
@@ -469,7 +470,7 @@ class APIOLT1240XA:
 
     def _parse_kv_colon_blocks(self, raw: str) -> Dict[str, Any]:
         """
-        Parser simple para bloques con "Key : Value" (muy típico en status).
+        Parser simple para bloques con "Key : Value".
         Tolera prefijos con "|" y separadores.
         """
         details: Dict[str, Any] = {}
@@ -480,7 +481,6 @@ class APIOLT1240XA:
             if self.SEP_RE.match(s):
                 continue
 
-            # Quitar bordes de tabla
             s = s.lstrip("|").strip()
             if ":" not in s:
                 continue
@@ -495,7 +495,7 @@ class APIOLT1240XA:
 
     def _parse_status_history(self, raw: str) -> List[Dict[str, Any]]:
         """
-        Ejemplo real:
+        Ejemplo:
           AID | Status Time
           ont-2-16-40 | 1 IS 2026/ 1/14 16:16:27
         """
@@ -516,7 +516,6 @@ class APIOLT1240XA:
             if not right:
                 continue
 
-            # "1 IS 2026/ 1/14 16:16:27"
             tokens = right.split()
             if len(tokens) < 4:
                 continue
@@ -527,157 +526,110 @@ class APIOLT1240XA:
 
         return history
 
-    def _parse_all_onts_filter1(self, raw: str) -> List[Dict[str, Any]]:
-        lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
-        by_aid: Dict[str, Dict[str, Any]] = {}
-
-        header_seen = False
-        for line in lines:
-            s = line.rstrip()
-            if self.SEP_RE.match(s.strip()):
-                continue
-
-            # Cabecera
-            if ("AID" in s) and ("Vendor/Model" in s):
-                header_seen = True
-                continue
-            if not header_seen:
-                continue
-
-            # Resumen final
-            if s.strip().startswith("slot ") and " has " in s and " ont" in s:
-                continue
-
-            if "|" not in s:
-                continue
-
-            parts = [p.strip() for p in s.split("|")]
-            if not parts:
-                continue
-
-            aid = parts[0].strip()
-            if not aid or not self.AID_RE.match(aid):
-                continue
-
-            rest = " | ".join(parts[1:]).strip()
-            rest_norm = " ".join(rest.split())
-
-            row_type = None
-            if rest_norm.startswith("Config ") or " Config " in f" {rest_norm} ":
-                row_type = "Config"
-            elif rest_norm.startswith("Actual ") or " Actual " in f" {rest_norm} ":
-                row_type = "Actual"
-
-            if row_type is None:
-                if self.debug:
-                    rec_dbg = by_aid.setdefault(aid, {"AID": aid})
-                    rec_dbg.setdefault("_raw_rows", []).append(rest)
-                continue
-
-            parsed = self._parse_filter1_row_payload(rest_norm, row_type=row_type)
-            if not parsed:
-                if self.debug:
-                    rec_dbg = by_aid.setdefault(aid, {"AID": aid})
-                    rec_dbg.setdefault("_raw_rows", []).append(rest)
-                continue
-
-            rec = by_aid.setdefault(aid, {"AID": aid})
-            rec.setdefault("_rows", {})
-            rec["_rows"][row_type] = parsed
-
-            chosen = rec["_rows"].get("Actual") or rec["_rows"].get("Config") or {}
-            self._apply_chosen_row_to_record(rec, chosen)
-
-        out: List[Dict[str, Any]] = []
-        for _, rec in by_aid.items():
-            rec.pop("_rows", None)
-            if not self.debug:
-                rec.pop("_raw_rows", None)
-            out.append(rec)
-
-        out.sort(key=lambda x: x.get("AID", ""))
-        return out  # <- importante: devolver TODO (sin cortar a 5)
-
-    def _parse_filter1_row_payload(self, rest_norm: str, row_type: str) -> Optional[Dict[str, Any]]:
+    def _parse_image_active_version(self, s: str) -> Tuple[str, str, str]:
         """
-        Parseo heurístico de la parte derecha para una fila Config/Actual.
-
-        Objetivo mínimo:
-          Type, SN, Password, Status, Image, Active, Version, Vendor, Model
+        Segmento típico: "<image> [V] [V] <version>"
         """
-        tokens = rest_norm.split()
-        if len(tokens) < 5:
+        ss = " ".join(s.split())
+        if not ss:
+            return "", "", ""
+
+        toks = ss.split()
+        if not toks:
+            return "", "", ""
+
+        image = toks[0] if toks[0].isdigit() else ""
+        rest = toks[1:] if image else toks[:]
+
+        active = ""
+        while rest and rest[0].upper() == "V":
+            active = "V"
+            rest = rest[1:]
+
+        version = ""
+        if rest:
+            cand = rest[0]
+            if re.fullmatch(r"V[0-9A-Za-z._-]{3,}", cand):
+                version = cand
+
+        return image, active, version
+
+    def _parse_remote_ont_filter_row(self, line: str, *, last_aid: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        Parsea una línea de tabla:
+          AID | Type SN Password Status | Image Active Version | Vendor/Model
+
+        La línea "continuación" de Actual suele venir con AID vacío (hereda last_aid).
+        """
+        parts = [p.strip() for p in line.split("|")]
+        while len(parts) < 4:
+            parts.append("")
+
+        aid = parts[0].strip()
+        mid = parts[1].strip()
+        imgver = parts[2].strip()
+        vend_model = parts[3].strip()
+
+        if not aid:
+            if not last_aid:
+                return None
+            aid = last_aid
+
+        if not self.AID_RE.match(aid):
+            return None
+
+        mid_norm = " ".join(mid.split())
+        if not mid_norm:
+            return None
+
+        tokens = mid_norm.split()
+        if not tokens:
             return None
 
         if tokens[0] not in ("Config", "Actual"):
-            # permitimos forzar
-            pass
+            return None
 
-        t0 = tokens[0] if tokens[0] in ("Config", "Actual") else row_type
+        row_type = tokens[0]
+        tokens = tokens[1:]
 
-        # Buscar SN (hex 8..32)
+        # buscar SN
         sn_idx = None
         for i, tok in enumerate(tokens):
             if re.fullmatch(r"[0-9A-Fa-f]{8,32}", tok):
                 sn_idx = i
                 break
+
         if sn_idx is None:
-            return None
+            sn = ""
+            password = ""
+            status = tokens[-1] if tokens else ""
+        else:
+            sn = tokens[sn_idx]
+            password = tokens[sn_idx + 1] if sn_idx + 1 < len(tokens) else ""
+            status = tokens[sn_idx + 2] if sn_idx + 2 < len(tokens) else ""
 
-        typ = t0
-        sn = tokens[sn_idx]
-        password = tokens[sn_idx + 1] if sn_idx + 1 < len(tokens) else ""
-        status = tokens[sn_idx + 2] if sn_idx + 2 < len(tokens) else ""
+        image, active, version = self._parse_image_active_version(imgver)
 
-        image = ""
-        active = ""
-        version = ""
-        vendor_model = ""
-
-        tail = tokens[sn_idx + 3 :] if (sn_idx + 3) < len(tokens) else []
-
-        if tail:
-            if re.fullmatch(r"\d+", tail[0]):
-                image = tail[0]
-                tail = tail[1:]
-
-        if tail:
-            if tail[0].upper() == "V":
-                active = "V"
-                tail = tail[1:]
-            if tail and tail[0].upper() == "V":
-                if not active:
-                    active = "V"
-                tail = tail[1:]
-
-        if tail:
-            if tail[0].startswith("V"):
-                version = tail[0]
-                tail = tail[1:]
-
-        if tail:
-            vendor_model = " ".join(tail)
-
-        parsed: Dict[str, Any] = {
-            "Type": typ,
+        payload: Dict[str, Any] = {
+            "Type": row_type,
             "SN": sn,
             "Password": password,
             "Status": status,
         }
         if image:
-            parsed["Image"] = image
+            payload["Image"] = image
         if active:
-            parsed["Active"] = active
+            payload["Active"] = active
         if version:
-            parsed["Version"] = version
+            payload["Version"] = version
 
-        if vendor_model:
-            if re.fullmatch(r"[A-Za-z]{3,6}", vendor_model) or vendor_model.upper().startswith("ZY"):
-                parsed["Vendor"] = vendor_model
+        if vend_model:
+            if re.fullmatch(r"[A-Z]{3,8}", vend_model):
+                payload["Vendor"] = vend_model
             else:
-                parsed["Model"] = vendor_model
+                payload["Model"] = vend_model
 
-        return parsed
+        return {"AID": aid, "_row_type": row_type, "_row_payload": payload}
 
     def _apply_chosen_row_to_record(self, rec: Dict[str, Any], chosen: Dict[str, Any]) -> None:
         for k in ("SN", "Password", "Status"):
@@ -699,6 +651,72 @@ class APIOLT1240XA:
             rec["Image"] = chosen["Image"]
         if "Active" in chosen and chosen["Active"]:
             rec["Active"] = chosen["Active"]
+
+    def _parse_all_onts_filter(self, raw: str) -> List[Dict[str, Any]]:
+        """
+        Parser robusto para:
+          show interface remote ont filter <n>
+
+        Soporta:
+        - 2 líneas por AID (Config/Actual) con AID vacío en la segunda línea.
+        - Múltiples bloques con cabecera repetida.
+        - Columnas segmentadas por pipes (|).
+        """
+        lines = [l.rstrip("\r") for l in raw.splitlines()]
+        by_aid: Dict[str, Dict[str, Any]] = {}
+
+        last_aid: Optional[str] = None
+        header_mode = False
+
+        for line in lines:
+            s = line.rstrip()
+            if not s.strip():
+                continue
+
+            if self.SEP_RE.match(s.strip()):
+                continue
+
+            if s.strip().startswith("slot ") and " has " in s and " ont" in s:
+                header_mode = False
+                last_aid = None
+                continue
+
+            if "AID" in s and "Vendor/Model" in s:
+                header_mode = True
+                last_aid = None
+                continue
+
+            if not header_mode:
+                continue
+
+            if "|" not in s:
+                continue
+
+            parsed = self._parse_remote_ont_filter_row(s, last_aid=last_aid)
+            if not parsed:
+                continue
+
+            aid = parsed["AID"]
+            last_aid = aid
+
+            row_type = parsed.get("_row_type")
+            row_payload = parsed.get("_row_payload", {})
+
+            rec = by_aid.setdefault(aid, {"AID": aid})
+            rec.setdefault("_rows", {})
+            if row_type and row_payload:
+                rec["_rows"][row_type] = row_payload
+
+            chosen = rec["_rows"].get("Actual") or rec["_rows"].get("Config") or {}
+            self._apply_chosen_row_to_record(rec, chosen)
+
+        out: List[Dict[str, Any]] = []
+        for _, rec in by_aid.items():
+            rec.pop("_rows", None)
+            out.append(rec)
+
+        out.sort(key=lambda x: x.get("AID", ""))
+        return out
 
     def _parse_config_1240xa(self, aid: str, raw: str) -> Dict[str, Any]:
         lines = [l.rstrip("\r") for l in raw.splitlines() if l.strip()]
