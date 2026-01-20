@@ -29,6 +29,10 @@
 #### 1.1.0
 - Integradas OLTs 1240XA y OLT2406
 
+#### 1.1.1 
+- Reparado Bug en el collector de ONTs de la 1240XA.
+- 
+
 ## Licencia
 
 MIT License
