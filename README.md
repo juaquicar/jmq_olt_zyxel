@@ -29,7 +29,7 @@
 #### 1.1.0
 - Integradas OLTs 1240XA y OLT2406
 
-#### 1.1.1
+#### 1.1.1 
 - Errata que no permitia extracción en 1240XA si se ponía un nombre personalizado.
 
 ## Licencia
