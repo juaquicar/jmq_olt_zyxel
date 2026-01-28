@@ -89,7 +89,7 @@ class APIOLT1240XA:
         password: str,
         prompt: str = "MSC1240XA#",
         timeout: int = 30,
-        login_user_prompt: bytes = b"MSC1240XA login:",
+        login_user_prompt: bytes = b"login:",
         login_pass_prompt: bytes = b"Password:",
         debug: bool = False,
         debug_telnet_dump: bool = False,
