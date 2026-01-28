@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jmq_olt_zyxel"
-version = "1.1.1"
+version = "1.1.2"
 description = "Paquete de Integración OLT Zyxel con Python"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = {text = "MIT"}
